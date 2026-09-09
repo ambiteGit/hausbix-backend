@@ -1,0 +1,20 @@
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+sqlalchemy==2.0.36
+psycopg2-binary==2.9.10
+pydantic[email]==2.10.3
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+# passlib 1.7.4 rompe con bcrypt >=4.1.0 (más estricto con el límite de 72
+# bytes, lo que hace fallar la propia autocomprobación interna de passlib
+# antes de procesar ninguna contraseña real). Fijar una versión anterior:
+bcrypt==4.0.1
+# alembic no está configurada todavía (no hay carpeta de migraciones) — se deja
+# lista para cuando sustituyas Base.metadata.create_all() por migraciones reales.
+alembic==1.14.0
+twilio==9.3.7
+httpx==0.28.1
+google-auth==2.36.0
+# Stripe evoluciona rápido — si al instalar da algún error de compatibilidad,
+# consulta la guía de migración oficial: https://github.com/stripe/stripe-python/wiki
+stripe==15.2.1
