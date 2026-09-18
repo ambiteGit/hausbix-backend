@@ -30,8 +30,8 @@ def registro(payload: schemas.UsuarioRegistro, db: Session = Depends(get_db)):
     if existente:
         raise HTTPException(status_code=409, detail="Ya existe una cuenta con ese email")
 
-    if payload.tipo_cuenta == "inmobiliaria" and not (payload.nombre_empresa and payload.cif):
-        raise HTTPException(status_code=400, detail="Falta el nombre de la empresa o el CIF")
+    if payload.tipo_cuenta == "inmobiliaria" and not payload.nombre_empresa:
+        raise HTTPException(status_code=400, detail="Falta el nombre de la empresa")
 
     usuario = models.Usuario(
         nombre=payload.nombre,
@@ -161,6 +161,11 @@ def verificar_codigo_email(
     return usuario
 
 
+@router.get("/me", response_model=schemas.UsuarioOut)
+def mi_perfil(usuario: models.Usuario = Depends(usuario_actual)):
+    return usuario
+
+
 @router.post("/push-token")
 def guardar_push_token(
     payload: schemas.PushTokenIn,
@@ -172,7 +177,25 @@ def guardar_push_token(
     return {"ok": True}
 
 
-GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID")
+@router.patch("/mi-perfil", response_model=schemas.UsuarioOut)
+def actualizar_mi_perfil(
+    payload: schemas.UsuarioActualizar,
+    db: Session = Depends(get_db),
+    usuario: models.Usuario = Depends(usuario_actual),
+):
+    """Foto de perfil y breve descripción — visibles en sus anuncios, para
+    dar más confianza a quien los mira. Vale tanto para particulares como
+    para agentes de una inmobiliaria (el logo/descripción de la propia
+    inmobiliaria es aparte, ver /empresas/mi-empresa)."""
+    datos = payload.model_dump(exclude_unset=True)
+    for campo, valor in datos.items():
+        setattr(usuario, campo, valor)
+    db.commit()
+    db.refresh(usuario)
+    return usuario
+
+
+GOOGLE_CLIENT_IDS = [c.strip() for c in os.environ.get("GOOGLE_CLIENT_IDS", "").split(",") if c.strip()]
 
 
 @router.delete("/mi-cuenta", status_code=204)
@@ -195,9 +218,13 @@ def login_google(payload: schemas.GoogleLoginIn, db: Session = Depends(get_db)):
     """
     Recibe el id_token que devuelve Google tras el login en el cliente
     (expo-auth-session) y lo verifica contra los servidores de Google antes
-    de crear/recuperar la cuenta. Requiere GOOGLE_CLIENT_ID configurado.
+    de crear/recuperar la cuenta. Requiere GOOGLE_CLIENT_IDS configurado —
+    una lista separada por comas, porque el token trae una "audiencia"
+    distinta según desde dónde se inició sesión (iOS, Android o la web
+    usan Client ID distintos) y hay que aceptar cualquiera de los tres,
+    no solo uno.
     """
-    if not GOOGLE_CLIENT_ID:
+    if not GOOGLE_CLIENT_IDS:
         raise HTTPException(status_code=501, detail="Login con Google no configurado en el servidor")
 
     from google.oauth2 import id_token as google_id_token
@@ -205,7 +232,7 @@ def login_google(payload: schemas.GoogleLoginIn, db: Session = Depends(get_db)):
 
     try:
         datos = google_id_token.verify_oauth2_token(
-            payload.id_token, google_requests.Request(), GOOGLE_CLIENT_ID
+            payload.id_token, google_requests.Request(), GOOGLE_CLIENT_IDS
         )
     except ValueError:
         raise HTTPException(status_code=401, detail="Token de Google inválido")

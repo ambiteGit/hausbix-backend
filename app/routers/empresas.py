@@ -28,6 +28,27 @@ def ver_mi_empresa(db: Session = Depends(get_db), usuario: models.Usuario = Depe
     }
 
 
+@router.patch("/mi-empresa", response_model=schemas.EmpresaOut)
+def actualizar_mi_empresa(
+    payload: schemas.EmpresaActualizar,
+    db: Session = Depends(get_db),
+    usuario: models.Usuario = Depends(usuario_actual),
+):
+    """Logo y breve presentación de la inmobiliaria — cualquier agente
+    puede actualizarlo (no hace falta ser el propietario para esto, a
+    diferencia de invitar/quitar agentes)."""
+    if not usuario.empresa_id:
+        raise HTTPException(status_code=404, detail="No perteneces a ninguna inmobiliaria")
+
+    empresa = db.query(models.Empresa).filter_by(id=usuario.empresa_id).first()
+    datos = payload.model_dump(exclude_unset=True)
+    for campo, valor in datos.items():
+        setattr(empresa, campo, valor)
+    db.commit()
+    db.refresh(empresa)
+    return empresa
+
+
 @router.post("/invitar", status_code=201)
 def invitar_agente(
     payload: schemas.InvitarAgenteIn,

@@ -48,6 +48,9 @@ def listar_inmuebles(
     mascotas_permitidas: Optional[bool] = None,
     piscina: Optional[bool] = None,
     urbanizacion_privada: Optional[bool] = None,
+    admin_area_1: Optional[str] = None,
+    admin_area_2: Optional[str] = None,
+    pais: Optional[str] = None,
     servicio_wifi: Optional[bool] = None,
     servicio_tv: Optional[bool] = None,
     servicio_secador_pelo: Optional[bool] = None,
@@ -55,6 +58,12 @@ def listar_inmuebles(
     servicio_lavadora: Optional[bool] = None,
     servicio_cocina_equipada: Optional[bool] = None,
     servicio_calefaccion: Optional[bool] = None,
+    servicio_piso_radiante: Optional[bool] = None,
+    servicio_garaje_estacionamiento: Optional[bool] = None,
+    servicio_parrillero: Optional[bool] = None,
+    servicio_secadora: Optional[bool] = None,
+    servicio_plancha: Optional[bool] = None,
+    servicio_articulos_bano: Optional[bool] = None,
     tipo_alojamiento: Optional[models.TipoAlojamiento] = None,
     db: Session = Depends(get_db),
 ):
@@ -106,6 +115,12 @@ def listar_inmuebles(
         query = query.filter(models.Inmueble.moneda == moneda)
     if tipo_alojamiento is not None:
         query = query.filter(models.Inmueble.tipo_alojamiento == tipo_alojamiento)
+    if pais is not None:
+        query = query.filter(models.Inmueble.pais == pais)
+    if admin_area_1 is not None:
+        query = query.filter(models.Inmueble.admin_area_1 == admin_area_1)
+    if admin_area_2 is not None:
+        query = query.filter(models.Inmueble.admin_area_2 == admin_area_2)
 
     caracteristicas = {
         "ascensor": ascensor,
@@ -125,6 +140,12 @@ def listar_inmuebles(
         "servicio_lavadora": servicio_lavadora,
         "servicio_cocina_equipada": servicio_cocina_equipada,
         "servicio_calefaccion": servicio_calefaccion,
+        "servicio_piso_radiante": servicio_piso_radiante,
+        "servicio_garaje_estacionamiento": servicio_garaje_estacionamiento,
+        "servicio_parrillero": servicio_parrillero,
+        "servicio_secadora": servicio_secadora,
+        "servicio_plancha": servicio_plancha,
+        "servicio_articulos_bano": servicio_articulos_bano,
     }
     for nombre_columna, valor in caracteristicas.items():
         if valor is True:
@@ -134,6 +155,37 @@ def listar_inmuebles(
 
     inmuebles = query.order_by(models.Inmueble.destacado.desc(), models.Inmueble.fecha_creacion.desc()).limit(200).all()
     return [_a_salida_publica(inm) for inm in inmuebles]
+
+
+@router.get("/zonas-disponibles")
+def zonas_disponibles(pais: str, admin_area_1: Optional[str] = None, db: Session = Depends(get_db)):
+    """
+    Para rellenar los desplegables de "Departamento"/"Provincia" y
+    "Barrio"/"Municipio" del filtro de búsqueda — con las opciones que
+    de verdad existen entre los anuncios publicados en ese país, en vez
+    de mantener a mano una lista completa de todos los departamentos y
+    barrios de cada país (que además habría que traducir y mantener).
+    Si se pasa admin_area_1, además devuelve solo los admin_area_2 que
+    existen DENTRO de esa región (ej. los barrios de Maldonado, no todos
+    los de Uruguay).
+    """
+    query_1 = db.query(models.Inmueble.admin_area_1).filter(
+        models.Inmueble.pais == pais,
+        models.Inmueble.admin_area_1.isnot(None),
+        models.Inmueble.activo.is_(True),
+    ).distinct()
+    admin_area_1_valores = sorted(v[0] for v in query_1.all())
+
+    query_2 = db.query(models.Inmueble.admin_area_2).filter(
+        models.Inmueble.pais == pais,
+        models.Inmueble.admin_area_2.isnot(None),
+        models.Inmueble.activo.is_(True),
+    )
+    if admin_area_1:
+        query_2 = query_2.filter(models.Inmueble.admin_area_1 == admin_area_1)
+    admin_area_2_valores = sorted(v[0] for v in query_2.distinct().all())
+
+    return {"admin_area_1": admin_area_1_valores, "admin_area_2": admin_area_2_valores}
 
 
 @router.get("/{inmueble_id}", response_model=schemas.InmuebleOut)
@@ -227,7 +279,9 @@ def _validar_servicios_alquiler_temporal(payload: schemas.InmuebleCreate):
     algun_servicio = any([
         payload.servicio_wifi, payload.servicio_tv, payload.servicio_secador_pelo,
         payload.servicio_jacuzzi, payload.servicio_lavadora, payload.servicio_cocina_equipada,
-        payload.servicio_calefaccion,
+        payload.servicio_calefaccion, payload.servicio_piso_radiante, payload.servicio_garaje_estacionamiento,
+        payload.servicio_parrillero, payload.servicio_secadora, payload.servicio_plancha,
+        payload.servicio_articulos_bano,
     ])
     algo_en_texto_libre = bool(payload.servicios_adicionales_texto and payload.servicios_adicionales_texto.strip())
     if not algun_servicio and not algo_en_texto_libre:
@@ -287,8 +341,12 @@ def crear_inmueble(
     db: Session = Depends(get_db),
     usuario: models.Usuario = Depends(usuario_actual),
 ):
+    # Doble verificación — hace falta confirmar tanto el teléfono (por
+    # SMS) como el email antes de poder publicar, no basta con uno solo.
     if not usuario.telefono_verificado:
         raise HTTPException(status_code=403, detail="Debes verificar tu número de teléfono antes de publicar")
+    if not usuario.email_verificado:
+        raise HTTPException(status_code=403, detail="Debes verificar tu email antes de publicar")
 
     _validar_operaciones(payload.operaciones)
     _validar_servicios_alquiler_temporal(payload)

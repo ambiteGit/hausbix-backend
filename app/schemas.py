@@ -1,7 +1,8 @@
 from datetime import datetime, date
 from typing import Optional
-from pydantic import BaseModel, EmailStr, ConfigDict
+from pydantic import BaseModel, EmailStr, ConfigDict, field_validator
 
+from . import models
 from .models import TipoOperacion, TipoInmueble, EstadoDisponibilidad
 
 
@@ -70,6 +71,8 @@ class InmuebleCreate(BaseModel):
     mascotas_permitidas: bool = False
     piscina: bool = False
     urbanizacion_privada: bool = False
+    admin_area_1: Optional[str] = None  # Departamento (UY), Provincia (ES/AR)...
+    admin_area_2: Optional[str] = None  # Barrio (UY), Municipio (ES), localidad...
     mostrar_ubicacion_exacta: bool = True
     radio_privacidad_metros: Optional[int] = None
     lat_aproximada: Optional[float] = None
@@ -81,6 +84,12 @@ class InmuebleCreate(BaseModel):
     servicio_lavadora: bool = False
     servicio_cocina_equipada: bool = False
     servicio_calefaccion: bool = False
+    servicio_piso_radiante: bool = False
+    servicio_garaje_estacionamiento: bool = False
+    servicio_parrillero: bool = False
+    servicio_secadora: bool = False
+    servicio_plancha: bool = False
+    servicio_articulos_bano: bool = False
     servicios_adicionales_texto: Optional[str] = None
     numero_registro_vivienda: Optional[str] = None
     tipo_alojamiento: Optional[models.TipoAlojamiento] = None
@@ -127,6 +136,8 @@ class InmuebleOut(BaseModel):
     mascotas_permitidas: bool
     piscina: bool
     urbanizacion_privada: bool = False
+    admin_area_1: Optional[str] = None  # Departamento (UY), Provincia (ES/AR)...
+    admin_area_2: Optional[str] = None  # Barrio (UY), Municipio (ES), localidad...
     mostrar_ubicacion_exacta: bool = True
     radio_privacidad_metros: Optional[int] = None
     servicio_wifi: bool = False
@@ -136,6 +147,12 @@ class InmuebleOut(BaseModel):
     servicio_lavadora: bool = False
     servicio_cocina_equipada: bool = False
     servicio_calefaccion: bool = False
+    servicio_piso_radiante: bool = False
+    servicio_garaje_estacionamiento: bool = False
+    servicio_parrillero: bool = False
+    servicio_secadora: bool = False
+    servicio_plancha: bool = False
+    servicio_articulos_bano: bool = False
     servicios_adicionales_texto: Optional[str] = None
     numero_registro_vivienda: Optional[str] = None
     tipo_alojamiento: Optional[models.TipoAlojamiento] = None
@@ -179,6 +196,8 @@ class InmuebleUpdate(BaseModel):
     mascotas_permitidas: Optional[bool] = None
     piscina: Optional[bool] = None
     urbanizacion_privada: Optional[bool] = None
+    admin_area_1: Optional[str] = None
+    admin_area_2: Optional[str] = None
     telefono_contacto: Optional[str] = None
     operaciones: Optional[list[OperacionIn]] = None  # si se envía, sustituye la combinación entera
     fotos_nuevas: list[str] = []  # URLs de Cloudinary a añadir a las ya existentes
@@ -191,7 +210,19 @@ class UsuarioRegistro(BaseModel):
     password: str
     tipo_cuenta: str = "particular"  # "particular" o "inmobiliaria"
     nombre_empresa: Optional[str] = None  # requerido si tipo_cuenta == "inmobiliaria"
-    cif: Optional[str] = None  # requerido si tipo_cuenta == "inmobiliaria"
+    cif: Optional[str] = None  # opcional — CIF/NIF (España), RUT (Uruguay), CUIT (Argentina)...
+
+    @field_validator("password")
+    @classmethod
+    def password_segura(cls, valor: str) -> str:
+        """El aviso que se muestra al registrarse (web y app) dice "Mínimo
+        8 caracteres, con letras y números" — esto es lo que hace que ese
+        aviso sea real y no solo decorativo."""
+        if len(valor) < 8:
+            raise ValueError("La contraseña debe tener al menos 8 caracteres")
+        if not any(c.isalpha() for c in valor) or not any(c.isdigit() for c in valor):
+            raise ValueError("La contraseña debe combinar letras y números")
+        return valor
 
 
 class UsuarioLogin(BaseModel):
@@ -203,8 +234,14 @@ class EmpresaOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: str
     nombre: str
-    cif: str
+    cif: Optional[str] = None
     logo_url: Optional[str] = None
+    descripcion: Optional[str] = None
+
+
+class EmpresaActualizar(BaseModel):
+    logo_url: Optional[str] = None
+    descripcion: Optional[str] = None
 
 
 class UsuarioOut(BaseModel):
@@ -221,6 +258,14 @@ class UsuarioOut(BaseModel):
     rol_empresa: Optional[str] = None
     empresa: Optional[EmpresaOut] = None
     stripe_onboarding_completo: bool = False
+    foto_url: Optional[str] = None
+    descripcion: Optional[str] = None
+
+
+class UsuarioActualizar(BaseModel):
+    nombre: Optional[str] = None
+    foto_url: Optional[str] = None
+    descripcion: Optional[str] = None
 
 
 class InvitarAgenteIn(BaseModel):

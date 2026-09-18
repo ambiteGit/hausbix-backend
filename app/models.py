@@ -39,6 +39,7 @@ class TipoInmueble(str, enum.Enum):
     oficina = "oficina"
     chacra = "chacra"  # tipo regional (Uruguay, Argentina) — finca/parcela rural
     monoambiente = "monoambiente"  # tipo regional (Uruguay, Argentina) — estudio/una sola pieza
+    atico = "atico"
 
 
 class Moneda(str, enum.Enum):
@@ -109,8 +110,9 @@ class Empresa(Base):
 
     id = Column(UUID(as_uuid=False), primary_key=True, default=gen_uuid)
     nombre = Column(String, nullable=False)
-    cif = Column(String, nullable=False)
+    cif = Column(String, nullable=True)  # opcional — es CIF/NIF en España, RUT en Uruguay, CUIT en Argentina... y ninguno lo exige por ley solo para publicar
     logo_url = Column(String, nullable=True)
+    descripcion = Column(String, nullable=True)  # breve presentación de la inmobiliaria, visible en sus anuncios
     fecha_creacion = Column(DateTime, default=datetime.utcnow)
 
     agentes = relationship("Usuario", back_populates="empresa")
@@ -129,6 +131,8 @@ class Usuario(Base):
     metodo_login = Column(Enum(MetodoLogin), default=MetodoLogin.email)
     push_token = Column(String, nullable=True)
     fecha_registro = Column(DateTime, default=datetime.utcnow)
+    foto_url = Column(String, nullable=True)  # foto de perfil — para particulares, sobre todo
+    descripcion = Column(String, nullable=True)  # breve texto de presentación, visible en sus anuncios
 
     # Particular vs. inmobiliaria (varios agentes bajo la misma empresa)
     tipo_cuenta = Column(Enum(TipoCuenta), default=TipoCuenta.particular)
@@ -202,6 +206,16 @@ class Inmueble(Base):
     piscina = Column(Boolean, default=False)
     urbanizacion_privada = Column(Boolean, default=False)  # "urbanización privada" (España), "barrio cerrado" (Uruguay/Argentina)
 
+    # División administrativa, extraída automáticamente de los
+    # "address_components" que devuelve Google al elegir la dirección
+    # (autocompletado o geocodificación) — no se piden a mano. El nombre
+    # que se les da en cada país es distinto (Departamento/Barrio en
+    # Uruguay, Provincia/Municipio en España...) pero el dato es
+    # conceptualmente el mismo en todos: región de primer nivel y
+    # localidad/zona de segundo nivel dentro de ella.
+    admin_area_1 = Column(String, nullable=True, index=True)  # Departamento (UY), Provincia (ES/AR)...
+    admin_area_2 = Column(String, nullable=True, index=True)  # Barrio (UY), Municipio (ES), localidad...
+
     # Servicios — categoría propia para alquiler por fechas (distinta de
     # las "características" de arriba, que aplican a cualquier operación).
     # El propietario está obligado a indicarlos si publica alquiler por
@@ -213,6 +227,12 @@ class Inmueble(Base):
     servicio_lavadora = Column(Boolean, default=False)
     servicio_cocina_equipada = Column(Boolean, default=False)
     servicio_calefaccion = Column(Boolean, default=False)
+    servicio_piso_radiante = Column(Boolean, default=False)
+    servicio_garaje_estacionamiento = Column(Boolean, default=False)
+    servicio_parrillero = Column(Boolean, default=False)  # parrillero/BBQ portátil
+    servicio_secadora = Column(Boolean, default=False)  # secadora de ropa — "secarropa" en Uruguay/Argentina
+    servicio_plancha = Column(Boolean, default=False)  # plancha y tabla de planchar
+    servicio_articulos_bano = Column(Boolean, default=False)  # gel, champú y jabón
     # Para lo que no tiene sentido como filtro (toallas, sábanas, productos
     # de baño...) — texto libre, informativo, no se puede buscar por él.
     servicios_adicionales_texto = Column(String, nullable=True)

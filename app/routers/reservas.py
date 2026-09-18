@@ -17,8 +17,8 @@ router = APIRouter(tags=["reservas"])
 
 stripe.api_key = os.environ.get("STRIPE_SECRET_KEY")
 STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET")
-COMISION_PRIMERA_NOCHE_USD = 9.99  # el resto lo cobra el propietario directamente al llegar
-COMISION_PAGO_COMPLETO_USD = 11.99  # se paga toda la estancia por adelantado, con 10% de descuento
+COMISION_PRIMERA_NOCHE_USD = float(os.environ.get("COMISION_PRIMERA_NOCHE_USD", "9.99"))  # el resto lo cobra el propietario directamente al llegar
+COMISION_PAGO_COMPLETO_USD = float(os.environ.get("COMISION_PAGO_COMPLETO_USD", "11.99"))  # se paga toda la estancia por adelantado, con 10% de descuento
 
 # Mercado Pago exige una moneda concreta según el país de la cuenta del
 # vendedor — no vale poner USD siempre. Aproximación razonable a partir
