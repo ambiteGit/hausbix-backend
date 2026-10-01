@@ -1,0 +1,404 @@
+from typing import Optional
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session, joinedload
+
+from .. import models, schemas
+from ..database import get_db
+from ..auth import usuario_actual, usuario_opcional, _emails_admin
+from ..push import enviar_push
+from ..tipo_cambio import convertir
+
+router = APIRouter(prefix="/inmuebles", tags=["inmuebles"])
+
+
+def _a_salida_publica(inmueble: models.Inmueble, mostrar_exacta_siempre: bool = False) -> schemas.InmuebleOut:
+    """Construye la salida pública de un inmueble, sustituyendo lat/lng por
+    la ubicación aproximada cuando el propietario ha optado por ocultar la
+    exacta. mostrar_exacta_siempre se usa para el propio dueño/admin, que sí
+    debe ver la ubicación real (p. ej. para poder editarla)."""
+    salida = schemas.InmuebleOut.model_validate(inmueble)
+    if not mostrar_exacta_siempre and not inmueble.mostrar_ubicacion_exacta and inmueble.lat_aproximada is not None:
+        salida.lat = inmueble.lat_aproximada
+        salida.lng = inmueble.lng_aproximada
+    return salida
+
+
+@router.get("", response_model=list[schemas.InmuebleOut])
+def listar_inmuebles(
+    tipo_operacion: models.TipoOperacion,
+    sw_lat: Optional[float] = None,
+    sw_lng: Optional[float] = None,
+    ne_lat: Optional[float] = None,
+    ne_lng: Optional[float] = None,
+    precio_min: Optional[float] = None,
+    precio_max: Optional[float] = None,
+    m2_min: Optional[float] = None,
+    m2_utiles_min: Optional[float] = None,
+    m2_terreno_min: Optional[float] = None,
+    habitaciones_min: Optional[int] = None,
+    banos_min: Optional[int] = None,
+    tipo_inmueble: Optional[models.TipoInmueble] = None,
+    moneda: Optional[models.Moneda] = None,
+    ascensor: Optional[bool] = None,
+    terraza: Optional[bool] = None,
+    garaje: Optional[bool] = None,
+    trastero: Optional[bool] = None,
+    aire_acondicionado: Optional[bool] = None,
+    exterior: Optional[bool] = None,
+    amueblado: Optional[bool] = None,
+    mascotas_permitidas: Optional[bool] = None,
+    piscina: Optional[bool] = None,
+    urbanizacion_privada: Optional[bool] = None,
+    admin_area_1: Optional[str] = None,
+    admin_area_2: Optional[str] = None,
+    pais: Optional[str] = None,
+    servicio_wifi: Optional[bool] = None,
+    servicio_tv: Optional[bool] = None,
+    servicio_secador_pelo: Optional[bool] = None,
+    servicio_jacuzzi: Optional[bool] = None,
+    servicio_lavadora: Optional[bool] = None,
+    servicio_cocina_equipada: Optional[bool] = None,
+    servicio_calefaccion: Optional[bool] = None,
+    servicio_piso_radiante: Optional[bool] = None,
+    servicio_garaje_estacionamiento: Optional[bool] = None,
+    servicio_parrillero: Optional[bool] = None,
+    servicio_secadora: Optional[bool] = None,
+    servicio_plancha: Optional[bool] = None,
+    servicio_articulos_bano: Optional[bool] = None,
+    servicio_playero: Optional[bool] = None,
+    tipo_alojamiento: Optional[models.TipoAlojamiento] = None,
+    db: Session = Depends(get_db),
+):
+    """
+    Devuelve los inmuebles activos que tengan ACTIVA la operación pedida
+    (un inmueble puede tener varias a la vez: venta + alquiler_temporal, etc.).
+    El precio_min/precio_max filtra sobre el precio de ESA operación concreta,
+    no sobre las demás que pueda tener el inmueble.
+
+    Los filtros de características (ascensor, terraza...) solo se aplican si
+    se envían explícitamente a `true` — no filtran nada si no se pasan, así
+    que un inmueble sin ascensor no queda excluido a menos que el usuario
+    pida expresamente "con ascensor".
+
+    Nota de rendimiento: con PostGIS real, el filtro de zona debería ser
+    espacial (ST_Within / índice GiST) en vez de comparar lat/lng sueltos.
+    """
+    query = (
+        db.query(models.Inmueble)
+        .join(models.InmuebleOperacion)
+        .options(joinedload(models.Inmueble.fotos), joinedload(models.Inmueble.operaciones), joinedload(models.Inmueble.usuario).joinedload(models.Usuario.empresa))
+        .filter(
+            models.Inmueble.activo == True,  # noqa: E712
+            models.Inmueble.estado_moderacion == models.EstadoModeracion.aprobado,
+            models.InmuebleOperacion.tipo_operacion == tipo_operacion,
+        )
+    )
+
+    if None not in (sw_lat, sw_lng, ne_lat, ne_lng):
+        query = query.filter(
+            models.Inmueble.lat.between(sw_lat, ne_lat),
+            models.Inmueble.lng.between(sw_lng, ne_lng),
+        )
+    # El precio_min/precio_max NO se filtra aquí en SQL — un anuncio
+    # publicado en dólares debe poder aparecer igualmente al buscar en
+    # pesos uruguayos (o al revés), convirtiendo su precio a la moneda
+    # de búsqueda antes de compararlo. Ese filtrado se hace más abajo,
+    # en Python, una vez convertido cada precio.
+    if m2_min is not None:
+        query = query.filter(models.Inmueble.m2 >= m2_min)
+    if m2_utiles_min is not None:
+        query = query.filter(models.Inmueble.m2_utiles >= m2_utiles_min)
+    if m2_terreno_min is not None:
+        query = query.filter(models.Inmueble.m2_terreno >= m2_terreno_min)
+    if habitaciones_min is not None:
+        query = query.filter(models.Inmueble.habitaciones >= habitaciones_min)
+    if tipo_inmueble is not None:
+        query = query.filter(models.Inmueble.tipo_inmueble == tipo_inmueble)
+    if tipo_alojamiento is not None:
+        query = query.filter(models.Inmueble.tipo_alojamiento == tipo_alojamiento)
+    if pais is not None:
+        query = query.filter(models.Inmueble.pais == pais)
+    if admin_area_1 is not None:
+        query = query.filter(models.Inmueble.admin_area_1 == admin_area_1)
+    if admin_area_2 is not None:
+        query = query.filter(models.Inmueble.admin_area_2 == admin_area_2)
+
+    caracteristicas = {
+        "ascensor": ascensor,
+        "terraza": terraza,
+        "garaje": garaje,
+        "trastero": trastero,
+        "aire_acondicionado": aire_acondicionado,
+        "exterior": exterior,
+        "amueblado": amueblado,
+        "mascotas_permitidas": mascotas_permitidas,
+        "piscina": piscina,
+        "urbanizacion_privada": urbanizacion_privada,
+        "servicio_wifi": servicio_wifi,
+        "servicio_tv": servicio_tv,
+        "servicio_secador_pelo": servicio_secador_pelo,
+        "servicio_jacuzzi": servicio_jacuzzi,
+        "servicio_lavadora": servicio_lavadora,
+        "servicio_cocina_equipada": servicio_cocina_equipada,
+        "servicio_calefaccion": servicio_calefaccion,
+        "servicio_piso_radiante": servicio_piso_radiante,
+        "servicio_garaje_estacionamiento": servicio_garaje_estacionamiento,
+        "servicio_parrillero": servicio_parrillero,
+        "servicio_secadora": servicio_secadora,
+        "servicio_plancha": servicio_plancha,
+        "servicio_articulos_bano": servicio_articulos_bano,
+        "servicio_playero": servicio_playero,
+    }
+    for nombre_columna, valor in caracteristicas.items():
+        if valor is True:
+            query = query.filter(getattr(models.Inmueble, nombre_columna) == True)  # noqa: E712
+    if banos_min is not None:
+        query = query.filter(models.Inmueble.banos >= banos_min)
+
+    # Límite más alto que el máximo a devolver (200): al filtrar el precio
+    # aquí abajo, en Python, hace falta partir de más candidatos de los
+    # que se van a devolver al final, ya que algunos se descartarán por
+    # no entrar en el rango de precio una vez convertidos.
+    inmuebles = query.order_by(models.Inmueble.destacado.desc(), models.Inmueble.fecha_creacion.desc()).limit(600).all()
+
+    if precio_min is not None or precio_max is not None:
+        moneda_busqueda = moneda.value if moneda is not None else None
+        inmuebles_en_rango = []
+        for inm in inmuebles:
+            op = next((o for o in inm.operaciones if o.tipo_operacion == tipo_operacion), None)
+            if op is None:
+                continue
+            precio_comparar = op.precio
+            if moneda_busqueda is not None and inm.moneda.value != moneda_busqueda:
+                precio_comparar = convertir(op.precio, inm.moneda.value, moneda_busqueda)
+            if precio_min is not None and precio_comparar < precio_min:
+                continue
+            if precio_max is not None and precio_comparar > precio_max:
+                continue
+            inmuebles_en_rango.append(inm)
+        inmuebles = inmuebles_en_rango
+
+    inmuebles = inmuebles[:200]
+    return [_a_salida_publica(inm) for inm in inmuebles]
+
+
+@router.get("/zonas-disponibles")
+def zonas_disponibles(pais: str, admin_area_1: Optional[str] = None, db: Session = Depends(get_db)):
+    """
+    Para rellenar los desplegables de "Departamento"/"Provincia" y
+    "Barrio"/"Municipio" del filtro de búsqueda — con las opciones que
+    de verdad existen entre los anuncios publicados en ese país, en vez
+    de mantener a mano una lista completa de todos los departamentos y
+    barrios de cada país (que además habría que traducir y mantener).
+    Si se pasa admin_area_1, además devuelve solo los admin_area_2 que
+    existen DENTRO de esa región (ej. los barrios de Maldonado, no todos
+    los de Uruguay).
+    """
+    query_1 = db.query(models.Inmueble.admin_area_1).filter(
+        models.Inmueble.pais == pais,
+        models.Inmueble.admin_area_1.isnot(None),
+        models.Inmueble.activo.is_(True),
+    ).distinct()
+    admin_area_1_valores = sorted(v[0] for v in query_1.all())
+
+    query_2 = db.query(models.Inmueble.admin_area_2).filter(
+        models.Inmueble.pais == pais,
+        models.Inmueble.admin_area_2.isnot(None),
+        models.Inmueble.activo.is_(True),
+    )
+    if admin_area_1:
+        query_2 = query_2.filter(models.Inmueble.admin_area_1 == admin_area_1)
+    admin_area_2_valores = sorted(v[0] for v in query_2.distinct().all())
+
+    return {"admin_area_1": admin_area_1_valores, "admin_area_2": admin_area_2_valores}
+
+
+@router.get("/{inmueble_id}", response_model=schemas.InmuebleOut)
+def obtener_inmueble(inmueble_id: str, db: Session = Depends(get_db), usuario: Optional[models.Usuario] = Depends(usuario_opcional)):
+    inmueble = db.query(models.Inmueble).options(
+        joinedload(models.Inmueble.fotos),
+        joinedload(models.Inmueble.operaciones),
+        joinedload(models.Inmueble.disponibilidad),
+        joinedload(models.Inmueble.usuario).joinedload(models.Usuario.empresa),
+    ).filter(models.Inmueble.id == inmueble_id).first()
+
+    if not inmueble:
+        raise HTTPException(status_code=404, detail="Inmueble no encontrado")
+
+    es_dueno = usuario is not None and usuario.id == inmueble.usuario_id
+    es_admin = usuario is not None and usuario.email.lower() in _emails_admin()
+
+    if inmueble.estado_moderacion != models.EstadoModeracion.aprobado:
+        if not (es_dueno or es_admin):
+            raise HTTPException(status_code=404, detail="Inmueble no encontrado")
+
+    return _a_salida_publica(inmueble, mostrar_exacta_siempre=(es_dueno or es_admin))
+
+
+@router.get("/{inmueble_id}/pasarelas-disponibles")
+def pasarelas_disponibles(inmueble_id: str, db: Session = Depends(get_db)):
+    """Qué pasarelas de pago tiene conectadas el propietario de este
+    inmueble — lo necesita el huésped para saber cuáles puede elegir al
+    reservar. No expone ningún otro dato del propietario."""
+    inmueble = db.query(models.Inmueble).filter_by(id=inmueble_id).first()
+    if not inmueble:
+        raise HTTPException(status_code=404, detail="Inmueble no encontrado")
+    propietario = db.query(models.Usuario).filter_by(id=inmueble.usuario_id).first()
+    if not propietario:
+        return {"stripe": False, "mercadopago": False}
+    return {
+        "stripe": bool(propietario.stripe_account_id and propietario.stripe_onboarding_completo),
+        "mercadopago": bool(propietario.mercadopago_access_token),
+    }
+
+
+@router.post("/{inmueble_id}/contacto", status_code=204)
+def registrar_contacto(inmueble_id: str, db: Session = Depends(get_db)):
+    """
+    Se llama justo antes de abrir WhatsApp (público, sin login). Contador
+    simple, no guarda quién contacta.
+    """
+    inmueble = db.query(models.Inmueble).filter(models.Inmueble.id == inmueble_id).first()
+    if not inmueble:
+        raise HTTPException(status_code=404, detail="Inmueble no encontrado")
+    inmueble.contactos_recibidos += 1
+    db.commit()
+
+    propietario = db.query(models.Usuario).filter(models.Usuario.id == inmueble.usuario_id).first()
+    if propietario:
+        enviar_push(
+            propietario.push_token,
+            "Nuevo contacto en Hausbix",
+            f'Alguien se ha interesado por "{inmueble.titulo}" y va a escribirte por WhatsApp.',
+            data={"inmuebleId": inmueble.id},
+        )
+
+
+def _validar_operaciones(operaciones: list[schemas.OperacionIn]):
+    if not operaciones:
+        raise HTTPException(status_code=400, detail="Selecciona al menos un tipo de operación")
+
+    tipos_vistos = set()
+    for op in operaciones:
+        if op.tipo_operacion in tipos_vistos:
+            raise HTTPException(status_code=400, detail=f"Operación duplicada: {op.tipo_operacion}")
+        tipos_vistos.add(op.tipo_operacion)
+
+        if op.tipo_operacion == models.TipoOperacion.alquiler_invernal:
+            if not op.fecha_inicio or not op.fecha_fin:
+                raise HTTPException(status_code=400, detail="El alquiler invernal necesita fecha de inicio y fin")
+            if op.fecha_fin <= op.fecha_inicio:
+                raise HTTPException(status_code=400, detail="La fecha de fin debe ser posterior a la de inicio")
+        if op.precio is None and op.tipo_operacion != models.TipoOperacion.alquiler_temporal:
+            raise HTTPException(status_code=400, detail=f"Falta el precio para {op.tipo_operacion}")
+
+
+def _validar_servicios_alquiler_temporal(payload: schemas.InmuebleCreate):
+    """El alquiler por fechas es una estancia, no solo un inmueble — quien
+    va a alojarse necesita saber de antemano qué servicios tiene (wifi,
+    lavadora...), así que si se publica esta modalidad es obligatorio
+    indicar algo aquí, no dejarlo todo en blanco."""
+    es_alquiler_temporal = any(op.tipo_operacion == models.TipoOperacion.alquiler_temporal for op in payload.operaciones)
+    if not es_alquiler_temporal:
+        return
+    algun_servicio = any([
+        payload.servicio_wifi, payload.servicio_tv, payload.servicio_secador_pelo,
+        payload.servicio_jacuzzi, payload.servicio_lavadora, payload.servicio_cocina_equipada,
+        payload.servicio_calefaccion, payload.servicio_piso_radiante, payload.servicio_garaje_estacionamiento,
+        payload.servicio_parrillero, payload.servicio_secadora, payload.servicio_plancha,
+        payload.servicio_articulos_bano, payload.servicio_playero,
+    ])
+    algo_en_texto_libre = bool(payload.servicios_adicionales_texto and payload.servicios_adicionales_texto.strip())
+    if not algun_servicio and not algo_en_texto_libre:
+        raise HTTPException(
+            status_code=400,
+            detail="Indica los servicios de tu alojamiento (wifi, lavadora, etc.) — es obligatorio para alquiler por fechas",
+        )
+
+
+def _calcular_ubicacion_aproximada(lat: float, lng: float, radio_metros: int) -> tuple[float, float]:
+    """Desplaza aleatoriamente el punto dentro de un radio menor que el
+    círculo que se va a dibujar — si el centro del círculo fuera la
+    dirección real, conocer el radio delataría la ubicación exacta igual."""
+    import random
+    import math
+    radio_jitter = radio_metros * 0.6  # desplazamiento menor que el radio mostrado, para que el punto real siga dentro del círculo
+    angulo = random.uniform(0, 2 * math.pi)
+    distancia = random.uniform(0, radio_jitter)
+    delta_lat = (distancia * math.cos(angulo)) / 111_320  # metros → grados de latitud, aprox.
+    delta_lng = (distancia * math.sin(angulo)) / (111_320 * math.cos(math.radians(lat)) or 1)
+    return lat + delta_lat, lng + delta_lng
+
+
+def _validar_registro_vivienda_alemania(payload: schemas.InmuebleCreate):
+    """Reglamento (UE) 2024/1028 — municipios con ordenanza propia (en
+    Alemania: Aachen, Colonia y otras ciudades de NRW) exigen mostrar el
+    número de registro de la vivienda en cualquier anuncio de corta
+    duración. No se valida por ciudad exacta (no tenemos ese dato
+    estructurado todavía) — se exige para toda Alemania por precaución,
+    ya que es mejor pedir un dato de más que publicar sin él donde sí
+    hace falta."""
+    if payload.pais != "DE":
+        return
+    es_alquiler_temporal = any(op.tipo_operacion == models.TipoOperacion.alquiler_temporal for op in payload.operaciones)
+    if not es_alquiler_temporal:
+        return
+    if not payload.numero_registro_vivienda or not payload.numero_registro_vivienda.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Indica el número de registro de la vivienda (Wohnraum-ID) — obligatorio para alquiler por fechas en Alemania",
+        )
+
+
+def _validar_fotos_minimas(payload: schemas.InmuebleCreate):
+    """Un terreno no siempre tiene mucho que fotografiar (a veces es solo
+    una parcela vacía) — el resto de tipos sí necesita un mínimo para dar
+    confianza a quien mira el anuncio."""
+    if payload.tipo_inmueble == models.TipoInmueble.terreno:
+        return
+    if len(payload.fotos) < 4:
+        raise HTTPException(status_code=400, detail="Sube al menos 4 fotos del inmueble")
+
+
+@router.post("", response_model=schemas.InmuebleOut, status_code=201)
+def crear_inmueble(
+    payload: schemas.InmuebleCreate,
+    db: Session = Depends(get_db),
+    usuario: models.Usuario = Depends(usuario_actual),
+):
+    # Doble verificación — hace falta confirmar tanto el teléfono (por
+    # SMS) como el email antes de poder publicar, no basta con uno solo.
+    if not usuario.telefono_verificado:
+        raise HTTPException(status_code=403, detail="Debes verificar tu número de teléfono antes de publicar")
+    if not usuario.email_verificado:
+        raise HTTPException(status_code=403, detail="Debes verificar tu email antes de publicar")
+
+    _validar_operaciones(payload.operaciones)
+    _validar_servicios_alquiler_temporal(payload)
+    _validar_registro_vivienda_alemania(payload)
+    _validar_fotos_minimas(payload)
+
+    datos = payload.model_dump(exclude={"fotos", "operaciones"})
+
+    # Método de radio: si se pidió ocultar la ubicación exacta con un radio
+    # y no se envió ya un punto aproximado (p. ej. porque el cliente usó el
+    # método de pin manual), se calcula aquí uno aleatorio — una sola vez,
+    # para que no "salte" de sitio en cada visita.
+    if not payload.mostrar_ubicacion_exacta and payload.radio_privacidad_metros and not payload.lat_aproximada:
+        lat_aprox, lng_aprox = _calcular_ubicacion_aproximada(payload.lat, payload.lng, payload.radio_privacidad_metros)
+        datos["lat_aproximada"] = lat_aprox
+        datos["lng_aproximada"] = lng_aprox
+
+    inmueble = models.Inmueble(usuario_id=usuario.id, **datos)
+    db.add(inmueble)
+    db.flush()  # para tener inmueble.id antes del commit
+
+    for op in payload.operaciones:
+        db.add(models.InmuebleOperacion(inmueble_id=inmueble.id, **op.model_dump()))
+
+    for orden, url in enumerate(payload.fotos):
+        db.add(models.Foto(inmueble_id=inmueble.id, url=url, orden=orden))
+
+    db.commit()
+    db.refresh(inmueble)
+    return inmueble
